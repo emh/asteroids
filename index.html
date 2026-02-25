@@ -2,12 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
     <title>Asteroids Challenge</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <canvas id="game" aria-label="Asteroids game canvas"></canvas>
+    <main id="app">
+      <canvas id="game" aria-label="Asteroids game canvas"></canvas>
+
+      <section id="mobile-controls" aria-label="Mobile controls" hidden>
+        <div class="dpad-zone" id="dpad-zone" aria-label="Directional pad">
+          <span class="dpad-arrow dpad-arrow-up" aria-hidden="true">&uarr;</span>
+          <span class="dpad-arrow dpad-arrow-left" aria-hidden="true">&larr;</span>
+          <span class="dpad-arrow dpad-arrow-right" aria-hidden="true">&rarr;</span>
+          <span class="dpad-arrow dpad-arrow-down" aria-hidden="true">&darr;</span>
+          <div class="dpad-thumb" id="dpad-thumb" aria-hidden="true"></div>
+        </div>
+        <button class="control-btn fire-btn" id="fire-btn" aria-label="Fire weapon"></button>
+      </section>
+    </main>
     <script src="main.js"></script>
   </body>
 </html>

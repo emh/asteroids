@@ -1,5 +1,9 @@
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const mobileControlsRoot = document.getElementById("mobile-controls");
+const mobileDpadZone = document.getElementById("dpad-zone");
+const mobileDpadThumb = document.getElementById("dpad-thumb");
+const mobileFireButton = document.getElementById("fire-btn");
 
 const ASTEROID_RADII = {
   3: 56,
@@ -25,6 +29,7 @@ const BULLET_SPEED = 520;
 const BULLET_LIFETIME = 1.2;
 const SHOOT_COOLDOWN = 0.18;
 const STARTING_LIVES = 3;
+const MOBILE_GAME_RENDER_SCALE = 0.5;
 const WORLD_SCALE = 6;
 const WORLD_MIN_SIZE = 5400;
 const SHIP_EXPLOSION_DURATION = 0.9;
@@ -85,6 +90,19 @@ const STAR_LAYER_CONFIGS = [
 ];
 
 const keys = new Set();
+const mobileInput = {
+  enabled: false,
+  firePointerIds: new Set(),
+  padPointerId: null,
+  padVectorX: 0,
+  padVectorY: 0,
+  padActions: {
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+  },
+};
 let starLayers = [];
 let galaxies = [];
 let ambientTime = 0;
@@ -123,6 +141,8 @@ let powerUpSpawnAccumulator = 0;
 let shieldCharges = 0;
 let fireRateBoostTimer = 0;
 let speedBoostTimer = 0;
+let lastTouchEndTime = 0;
+let gameRenderScale = 1;
 
 function wrapValue(value, max) {
   if (max <= 0) {
@@ -167,12 +187,255 @@ function shouldRenderAt(x, y, padding = 0) {
   );
 }
 
+function hasTouchAction(action) {
+  if (action === "fire") {
+    return mobileInput.firePointerIds.size > 0;
+  }
+  return Boolean(mobileInput.padActions[action]);
+}
+
+function setPadActionsFromVector(x, y) {
+  const deadZone = 0.18;
+  const axisThreshold = 0.28;
+  const magnitude = Math.hypot(x, y);
+
+  if (magnitude < deadZone) {
+    mobileInput.padActions.up = false;
+    mobileInput.padActions.down = false;
+    mobileInput.padActions.left = false;
+    mobileInput.padActions.right = false;
+    return;
+  }
+
+  mobileInput.padActions.up = y < -axisThreshold;
+  mobileInput.padActions.down = y > axisThreshold;
+  mobileInput.padActions.left = x < -axisThreshold;
+  mobileInput.padActions.right = x > axisThreshold;
+}
+
+function updateDpadThumb() {
+  if (!mobileDpadZone || !mobileDpadThumb) {
+    return;
+  }
+
+  const maxTravel = mobileDpadZone.clientWidth * 0.24;
+  const offsetX = mobileInput.padVectorX * maxTravel;
+  const offsetY = mobileInput.padVectorY * maxTravel;
+  mobileDpadThumb.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
+}
+
+function resetPadInput() {
+  mobileInput.padPointerId = null;
+  mobileInput.padVectorX = 0;
+  mobileInput.padVectorY = 0;
+  mobileInput.padActions.up = false;
+  mobileInput.padActions.down = false;
+  mobileInput.padActions.left = false;
+  mobileInput.padActions.right = false;
+
+  if (mobileDpadZone) {
+    mobileDpadZone.classList.remove("is-active");
+  }
+
+  updateDpadThumb();
+}
+
+function updatePadFromPointer(clientX, clientY) {
+  if (!mobileDpadZone) {
+    return;
+  }
+
+  const rect = mobileDpadZone.getBoundingClientRect();
+  const radius = Math.min(rect.width, rect.height) * 0.5;
+  if (radius <= 0) {
+    resetPadInput();
+    return;
+  }
+
+  const centerX = rect.left + rect.width * 0.5;
+  const centerY = rect.top + rect.height * 0.5;
+  let normalizedX = (clientX - centerX) / radius;
+  let normalizedY = (clientY - centerY) / radius;
+  const magnitude = Math.hypot(normalizedX, normalizedY);
+
+  if (magnitude > 1) {
+    normalizedX /= magnitude;
+    normalizedY /= magnitude;
+  }
+
+  mobileInput.padVectorX = normalizedX;
+  mobileInput.padVectorY = normalizedY;
+  setPadActionsFromVector(normalizedX, normalizedY);
+  mobileDpadZone.classList.add("is-active");
+  updateDpadThumb();
+}
+
+function updateFireButtonVisual() {
+  if (!mobileFireButton) {
+    return;
+  }
+  mobileFireButton.classList.toggle("is-active", mobileInput.firePointerIds.size > 0);
+}
+
+function releaseTouchPointer(pointerId) {
+  if (mobileInput.padPointerId === pointerId) {
+    resetPadInput();
+  }
+
+  if (mobileInput.firePointerIds.delete(pointerId)) {
+    updateFireButtonVisual();
+  }
+}
+
+function clearTouchActions() {
+  mobileInput.firePointerIds.clear();
+  updateFireButtonVisual();
+  resetPadInput();
+}
+
+function shouldUseMobileControls() {
+  const hasTouch = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
+  if (!hasTouch) {
+    return false;
+  }
+
+  return window.matchMedia("(max-width: 1024px), (max-height: 900px)").matches;
+}
+
+function refreshMobileControlsLayout() {
+  const enabled = shouldUseMobileControls();
+  mobileInput.enabled = enabled;
+  document.body.classList.toggle("mobile-controls-enabled", enabled);
+
+  if (mobileControlsRoot) {
+    mobileControlsRoot.hidden = !enabled;
+  }
+
+  clearTouchActions();
+}
+
+function setupMobileControls() {
+  if (!mobileControlsRoot) {
+    return;
+  }
+
+  if (mobileDpadZone) {
+    mobileDpadZone.addEventListener("pointerdown", (event) => {
+      if (!mobileInput.enabled) {
+        return;
+      }
+
+      if (event.pointerType === "mouse" && event.button !== 0) {
+        return;
+      }
+
+      if (mobileInput.padPointerId !== null && mobileInput.padPointerId !== event.pointerId) {
+        return;
+      }
+
+      event.preventDefault();
+      mobileInput.padPointerId = event.pointerId;
+      if (mobileDpadZone.setPointerCapture) {
+        mobileDpadZone.setPointerCapture(event.pointerId);
+      }
+      updatePadFromPointer(event.clientX, event.clientY);
+    });
+
+    mobileDpadZone.addEventListener("pointermove", (event) => {
+      if (!mobileInput.enabled || mobileInput.padPointerId !== event.pointerId) {
+        return;
+      }
+
+      event.preventDefault();
+      updatePadFromPointer(event.clientX, event.clientY);
+    });
+
+    mobileDpadZone.addEventListener("pointerup", (event) => {
+      releaseTouchPointer(event.pointerId);
+    });
+    mobileDpadZone.addEventListener("pointercancel", (event) => {
+      releaseTouchPointer(event.pointerId);
+    });
+  }
+
+  if (mobileFireButton) {
+    mobileFireButton.addEventListener("pointerdown", (event) => {
+      if (!mobileInput.enabled) {
+        return;
+      }
+
+      if (event.pointerType === "mouse" && event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      mobileInput.firePointerIds.add(event.pointerId);
+      updateFireButtonVisual();
+      if (mobileFireButton.setPointerCapture) {
+        mobileFireButton.setPointerCapture(event.pointerId);
+      }
+
+      if (screen === "playing") {
+        fireBullet();
+      } else if (screen === "welcome") {
+        startGame();
+      }
+    });
+
+    mobileFireButton.addEventListener("pointerup", (event) => {
+      releaseTouchPointer(event.pointerId);
+    });
+    mobileFireButton.addEventListener("pointercancel", (event) => {
+      releaseTouchPointer(event.pointerId);
+    });
+  }
+
+  mobileControlsRoot.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
+  window.addEventListener("pointerup", (event) => {
+    releaseTouchPointer(event.pointerId);
+  });
+  window.addEventListener("pointercancel", (event) => {
+    releaseTouchPointer(event.pointerId);
+  });
+}
+
 function isThrusting() {
-  return keys.has("ArrowUp") || keys.has("KeyW");
+  return keys.has("ArrowUp") || keys.has("KeyW") || hasTouchAction("up");
 }
 
 function isReverseThrusting() {
-  return keys.has("ArrowDown") || keys.has("KeyS");
+  return keys.has("ArrowDown") || keys.has("KeyS") || hasTouchAction("down");
+}
+
+function getMobileTurnInput() {
+  if (!mobileInput.enabled || mobileInput.padPointerId === null) {
+    return 0;
+  }
+
+  const x = mobileInput.padVectorX;
+  const absX = Math.abs(x);
+  if (absX < 0.03) {
+    return 0;
+  }
+
+  const curvedTurn = absX * absX;
+  return x < 0 ? -curvedTurn : curvedTurn;
+}
+
+function getTurnInput() {
+  let turnInput = 0;
+  if (keys.has("ArrowLeft") || keys.has("KeyA")) {
+    turnInput -= 1;
+  }
+  if (keys.has("ArrowRight") || keys.has("KeyD")) {
+    turnInput += 1;
+  }
+
+  turnInput += getMobileTurnInput();
+  return clamp(turnInput, -1, 1);
 }
 
 function clamp(value, min, max) {
@@ -221,8 +484,13 @@ function ensureWorldSize() {
 }
 
 function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  refreshMobileControlsLayout();
+  gameRenderScale = mobileInput.enabled ? MOBILE_GAME_RENDER_SCALE : 1;
+
+  const displayWidth = Math.max(1, Math.floor(canvas.clientWidth || window.innerWidth));
+  const displayHeight = Math.max(1, Math.floor(canvas.clientHeight || window.innerHeight));
+  canvas.width = Math.max(1, Math.floor(displayWidth / gameRenderScale));
+  canvas.height = Math.max(1, Math.floor(displayHeight / gameRenderScale));
   ensureWorldSize();
   buildStarField();
 
@@ -1029,13 +1297,9 @@ function updateShip(dt, thrustInput) {
     ? SHIP_REVERSE_THRUST * SHIP_SPEED_BOOST_THRUST_MULTIPLIER
     : SHIP_REVERSE_THRUST;
   const dragValue = speedBoostActive ? SHIP_SPEED_BOOST_DRAG : SHIP_DRAG;
-
-  if (keys.has("ArrowLeft") || keys.has("KeyA")) {
-    ship.angle -= SHIP_ROTATION_SPEED * dt;
-  }
-
-  if (keys.has("ArrowRight") || keys.has("KeyD")) {
-    ship.angle += SHIP_ROTATION_SPEED * dt;
+  const turnInput = getTurnInput();
+  if (turnInput !== 0) {
+    ship.angle += SHIP_ROTATION_SPEED * turnInput * dt;
   }
 
   if (thrustInput > 0) {
@@ -2210,27 +2474,27 @@ function drawRadar() {
   ctx.beginPath();
   ctx.arc(centerX, centerY, 4.8, 0, Math.PI * 2);
   ctx.stroke();
-
-  const countsY = panelY - 12;
-  const leftCountX = panelX + 8;
-  const rightCountX = panelX + size * 0.52;
-  drawAsteroidHudIcon(leftCountX, countsY - 1, 6);
-  drawEnemyHudIcon(rightCountX, countsY - 1, 6);
-
-  ctx.font = "700 15px monospace";
-  ctx.fillStyle = "rgba(218, 233, 255, 0.95)";
-  ctx.textAlign = "left";
-  ctx.fillText(`${asteroids.length}`, leftCountX + 11, countsY + 4);
-  ctx.fillText(`${enemies.length}`, rightCountX + 11, countsY + 4);
 }
 
 function drawHud() {
   ctx.fillStyle = "#dbeafe";
-  ctx.font = "700 22px monospace";
-  ctx.textAlign = "left";
-  ctx.fillText(`Score: ${score}`, 18, 34);
+  ctx.font = "700 24px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(`${score}`, canvas.width * 0.5, 34);
 
   if (screen === "playing") {
+    const countsY = 30;
+    const asteroidCountX = 18;
+    const enemyCountX = 82;
+    drawAsteroidHudIcon(asteroidCountX, countsY - 1, 6.5);
+    drawEnemyHudIcon(enemyCountX, countsY - 1, 6.5);
+
+    ctx.font = "700 15px monospace";
+    ctx.fillStyle = "rgba(218, 233, 255, 0.95)";
+    ctx.textAlign = "left";
+    ctx.fillText(`${asteroids.length}`, asteroidCountX + 12, countsY + 4);
+    ctx.fillText(`${enemies.length}`, enemyCountX + 12, countsY + 4);
+
     drawPlayerStatusHud();
     drawRadar();
   }
@@ -2238,7 +2502,11 @@ function drawHud() {
 
 function drawWelcome() {
   const heading = gameOver ? "GAME OVER" : "ASTEROIDS";
-  const subtitle = gameOver ? `Final score: ${score}` : "Press Space to Start";
+  const subtitle = gameOver
+    ? `Final score: ${score}`
+    : mobileInput.enabled
+      ? "Tap FIRE to Start"
+      : "Press Space to Start";
 
   ctx.textAlign = "center";
   ctx.fillStyle = "#ffffff";
@@ -2251,14 +2519,20 @@ function drawWelcome() {
 
   ctx.font = "400 22px monospace";
   ctx.fillStyle = "#9eb3d4";
-  ctx.fillText(
-    "Rotate: Left / Right (or A / D)",
-    canvas.width / 2,
-    canvas.height * 0.57,
-  );
-  ctx.fillText("Thrust: Up (or W)", canvas.width / 2, canvas.height * 0.63);
-  ctx.fillText("Reverse Thrust: Down (or S)", canvas.width / 2, canvas.height * 0.69);
-  ctx.fillText("Shoot: Space", canvas.width / 2, canvas.height * 0.75);
+  if (mobileInput.enabled) {
+    ctx.fillText("Drag the left control circle to steer", canvas.width / 2, canvas.height * 0.6);
+    ctx.fillText("Top = thrust, bottom = reverse", canvas.width / 2, canvas.height * 0.67);
+    ctx.fillText("Diagonals combine turn + thrust", canvas.width / 2, canvas.height * 0.74);
+  } else {
+    ctx.fillText(
+      "Rotate: Left / Right (or A / D)",
+      canvas.width / 2,
+      canvas.height * 0.57,
+    );
+    ctx.fillText("Thrust: Up (or W)", canvas.width / 2, canvas.height * 0.63);
+    ctx.fillText("Reverse Thrust: Down (or S)", canvas.width / 2, canvas.height * 0.69);
+    ctx.fillText("Shoot: Space", canvas.width / 2, canvas.height * 0.75);
+  }
 }
 
 function updateGame(dt) {
@@ -2272,6 +2546,9 @@ function updateGame(dt) {
   updatePowerUpTimers(dt);
   updateSpawning(dt);
   shootTimer = Math.max(0, shootTimer - dt);
+  if (!shipDestroyed && mobileInput.enabled && hasTouchAction("fire")) {
+    fireBullet();
+  }
   if (!shipDestroyed) {
     updateShip(dt, thrustInput);
   } else {
@@ -2339,6 +2616,40 @@ function loop(timestamp) {
   requestAnimationFrame(loop);
 }
 
+document.addEventListener("selectstart", (event) => {
+  event.preventDefault();
+});
+
+window.addEventListener(
+  "dblclick",
+  (event) => {
+    event.preventDefault();
+  },
+  { passive: false },
+);
+
+window.addEventListener(
+  "touchstart",
+  (event) => {
+    if (event.touches.length > 1) {
+      event.preventDefault();
+    }
+  },
+  { passive: false },
+);
+
+window.addEventListener(
+  "touchend",
+  (event) => {
+    const now = performance.now();
+    if (now - lastTouchEndTime < 320) {
+      event.preventDefault();
+    }
+    lastTouchEndTime = now;
+  },
+  { passive: false },
+);
+
 window.addEventListener("keydown", (event) => {
   const preventKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"];
   if (preventKeys.includes(event.code)) {
@@ -2360,8 +2671,21 @@ window.addEventListener("keyup", (event) => {
   keys.delete(event.code);
 });
 
+window.addEventListener("blur", () => {
+  keys.clear();
+  clearTouchActions();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    keys.clear();
+    clearTouchActions();
+  }
+});
+
 window.addEventListener("resize", resizeCanvas);
 
+setupMobileControls();
 resizeCanvas();
 render();
 requestAnimationFrame(loop);
